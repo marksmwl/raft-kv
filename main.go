@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/marksmwl/raft-kv/raft"
 )
@@ -24,7 +25,23 @@ func main() {
 		"localhost:8082",
 	}
 
-	node := raft.New(1, peers)
-	node.Start()
+	// Store node references so we can kill them
+	nodes := make(map[int]*raft.Raft)
+
+	for i, addr := range peers {
+		id := i + 1
+		node := raft.New(id, peers)
+		nodes[id] = node
+
+		go func(id int, addr string, node *raft.Raft) {
+			if err := node.ServeRPC(addr); err != nil {
+				log.Fatalf("node %d serve: %v", id, err)
+			}
+			node.Start() // now the loop runs
+		}(id, addr, node)
+	}
+
+	// Start interactive command handler
+
 	select {}
 }
