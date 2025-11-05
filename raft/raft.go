@@ -85,6 +85,8 @@ func (rf *Raft) startElection() {
 
 	fmt.Printf("[Node %d] Starting election in term %d\n", rf.id, rf.currentTerm)
 
+	rf.RequestVote()
+
 	rf.lastHeartbeatTime = time.Now()
 
 	rf.mu.Unlock()
