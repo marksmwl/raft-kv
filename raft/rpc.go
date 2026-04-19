@@ -133,11 +133,78 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// If this is a heartbeat (empty entries), accept it
 	if len(args.Entries) == 0 {
+		// Update commit index if leader's commit index is higher
+		if args.LeaderCommit > rf.commitIndex {
+			if args.LeaderCommit < len(rf.log) {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = len(rf.log)
+			}
+		}
 		reply.Success = true
 		return nil
 	}
 
-	// TODO: Handle actual log entries in future implementation
+	// Check if previous log entry matches
+	if args.PrevLogIndex > 0 {
+		if args.PrevLogIndex > len(rf.log) {
+			// Previous log entry doesn't exist
+			reply.Success = false
+			return nil
+		}
+		if rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
+			// Previous log entry term doesn't match
+			reply.Success = false
+			return nil
+		}
+	}
+
+	// Append new entries
+	// If there are conflicting entries, delete them and append new ones
+	if args.PrevLogIndex+len(args.Entries) <= len(rf.log) {
+		// Check if entries already match
+		match := true
+		for i, entry := range args.Entries {
+			if args.PrevLogIndex+i >= len(rf.log) || rf.log[args.PrevLogIndex+i].Term != entry.Term {
+				match = false
+				break
+			}
+		}
+		if match {
+			reply.Success = true
+			// Update commit index
+			if args.LeaderCommit > rf.commitIndex {
+				if args.LeaderCommit < len(rf.log) {
+					rf.commitIndex = args.LeaderCommit
+				} else {
+					rf.commitIndex = len(rf.log)
+				}
+			}
+			return nil
+		}
+	}
+
+	// Truncate log if necessary and append new entries
+	if args.PrevLogIndex < len(rf.log) {
+		rf.log = rf.log[:args.PrevLogIndex]
+	}
+
+	// Append new entries
+	for _, entry := range args.Entries {
+		entry.Index = len(rf.log) + 1
+		rf.log = append(rf.log, entry)
+		fmt.Printf("[Node %d] Appended entry at index %d from leader %d\n", rf.id, entry.Index, args.LeaderId)
+	}
+
+	// Update commit index
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit < len(rf.log) {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = len(rf.log)
+		}
+	}
+
 	reply.Success = true
 	return nil
 }

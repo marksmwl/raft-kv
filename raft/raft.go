@@ -27,6 +27,11 @@ func (s NodeState) String() string {
 	return "Unknown"
 }
 
+// StateMachine represents the interface for applying committed entries
+type StateMachine interface {
+	ApplyCommand(command interface{})
+}
+
 type Raft struct {
 	mu sync.Mutex
 
@@ -45,6 +50,11 @@ type Raft struct {
 	matchIndex []int
 
 	lastHeartbeatTime time.Time
+	stateMachine      StateMachine
+}
+
+func (rf *Raft) GetID() int {
+	return rf.id
 }
 
 func New(id int, peers []string) *Raft {
@@ -60,12 +70,24 @@ func New(id int, peers []string) *Raft {
 	rf.log = make([]LogEntry, 0)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	fmt.Println("Node", id, "is now a", rf.state)
 	return rf
 }
 
+// SetStateMachine sets the state machine to apply committed entries
+func (rf *Raft) SetStateMachine(sm StateMachine) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.stateMachine = sm
+}
+
 func (rf *Raft) Start() {
+	// Start applying committed entries
+	go rf.applyCommittedEntries()
+
 	for {
 		time.Sleep(5 * time.Millisecond) // 1 second heartbeat
 		rf.mu.Lock()
@@ -82,6 +104,56 @@ func (rf *Raft) Start() {
 			rf.mu.Unlock()
 		}
 	}
+}
+
+// applyCommittedEntries applies committed entries to the state machine
+func (rf *Raft) applyCommittedEntries() {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rf.mu.Lock()
+		for rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			entry := rf.log[rf.lastApplied-1] // log is 1-indexed conceptually
+			if rf.stateMachine != nil {
+				rf.mu.Unlock()
+				rf.stateMachine.ApplyCommand(entry.Command)
+				rf.mu.Lock()
+			}
+		}
+		rf.mu.Unlock()
+	}
+}
+
+// StartCommand starts agreement on a new log entry. Returns the index of the entry.
+// If this server isn't the leader, returns -1, false.
+func (rf *Raft) StartCommand(command interface{}) (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != Leader {
+		return -1, false
+	}
+
+	// Append entry to local log
+	index := len(rf.log) + 1
+	entry := LogEntry{
+		Term:    rf.currentTerm,
+		Index:   index,
+		Command: command,
+	}
+	rf.log = append(rf.log, entry)
+	fmt.Printf("[Node %d] Leader appended entry at index %d\n", rf.id, index)
+
+	return index, true
+}
+
+// IsLeader returns true if this node is the leader
+func (rf *Raft) IsLeader() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state == Leader
 }
 
 // getElectionTimeout returns a random timeout between 150-300ms
@@ -109,9 +181,10 @@ func (rf *Raft) leaderHeartbeat() {
 			return
 		}
 		currentTerm := rf.currentTerm
+		commitIndex := rf.commitIndex
 		rf.mu.Unlock()
 
-		// Send AppendEntries RPC with empty entries (heartbeat) to all peers (skip self)
+		// Send AppendEntries RPC to all peers (skip self)
 		ownIndex := leaderId - 1
 		for i, peer := range peers {
 			// Skip sending heartbeat to ourselves
@@ -119,18 +192,31 @@ func (rf *Raft) leaderHeartbeat() {
 				continue
 			}
 
-			go func(peer string) {
+			go func(peerIndex int, peer string) {
+				rf.mu.Lock()
+				nextIdx := rf.nextIndex[peerIndex]
+				prevLogIndex := nextIdx - 1
+				prevLogTerm := 0
+				if prevLogIndex > 0 && prevLogIndex <= len(rf.log) {
+					prevLogTerm = rf.log[prevLogIndex-1].Term
+				}
+				entries := []LogEntry{}
+				if nextIdx <= len(rf.log) {
+					entries = rf.log[nextIdx-1:]
+				}
+				rf.mu.Unlock()
+
 				args := &AppendEntriesArgs{
 					Term:         currentTerm,
 					LeaderId:     leaderId,
-					PrevLogIndex: -1, // No previous log entry for heartbeat
-					PrevLogTerm:  -1,
-					Entries:      []LogEntry{}, // Empty entries for heartbeat
-					LeaderCommit: -1,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					Entries:      entries,
+					LeaderCommit: commitIndex,
 				}
 				reply := &AppendEntriesReply{}
 				if err := call(peer, "Raft.AppendEntries", args, reply); err != nil {
-					fmt.Printf("[Node %d] AppendEntries heartbeat RPC to %s failed: %v\n", leaderId, peer, err)
+					fmt.Printf("[Node %d] AppendEntries RPC to %s failed: %v\n", leaderId, peer, err)
 				} else {
 					rf.mu.Lock()
 					// If we got a reply with a higher term, step down
@@ -139,10 +225,33 @@ func (rf *Raft) leaderHeartbeat() {
 						rf.state = Follower
 						rf.votedFor = -1
 						rf.resetElectionTimer()
+						rf.mu.Unlock()
+						return
+					}
+					if reply.Success {
+						rf.matchIndex[peerIndex] = prevLogIndex + len(entries)
+						rf.nextIndex[peerIndex] = rf.matchIndex[peerIndex] + 1
+						// Update commit index if majority has replicated
+						for n := rf.commitIndex + 1; n <= len(rf.log); n++ {
+							count := 1 // leader itself
+							for j := range rf.peers {
+								if j != ownIndex && rf.matchIndex[j] >= n {
+									count++
+								}
+							}
+							if count > len(rf.peers)/2 && rf.log[n-1].Term == currentTerm {
+								rf.commitIndex = n
+							}
+						}
+					} else {
+						// Decrement nextIndex and retry
+						if rf.nextIndex[peerIndex] > 1 {
+							rf.nextIndex[peerIndex]--
+						}
 					}
 					rf.mu.Unlock()
 				}
-			}(peer)
+			}(i, peer)
 		}
 	}
 }
@@ -219,6 +328,11 @@ func (rf *Raft) startElection() {
 				if gotVotes >= requiredVotes {
 					rf.state = Leader
 					rf.votedFor = -1
+					// Initialize leader state
+					for i := range rf.peers {
+						rf.nextIndex[i] = len(rf.log) + 1
+						rf.matchIndex[i] = 0
+					}
 					fmt.Printf("[Node %d] Became leader in term %d\n", candidateId, rf.currentTerm)
 					rf.mu.Unlock()
 					// Start sending heartbeats

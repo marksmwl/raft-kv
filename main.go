@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"log"
 
+	"github.com/marksmwl/raft-kv/api"
 	"github.com/marksmwl/raft-kv/raft"
 )
 
@@ -17,12 +17,20 @@ const (
 )
 
 func main() {
-	fmt.Println("Hello, World!")
-
 	peers := []string{
 		"localhost:8080",
 		"localhost:8081",
 		"localhost:8082",
+		"localhost:8083",
+		"localhost:8084",
+	}
+
+	apiAddrs := []string{
+		"localhost:9080",
+		"localhost:9081",
+		"localhost:9082",
+		"localhost:9083",
+		"localhost:9084",
 	}
 
 	// Store node references so we can kill them
@@ -31,17 +39,25 @@ func main() {
 	for i, addr := range peers {
 		id := i + 1
 		node := raft.New(id, peers)
+
+		apiServer := api.NewServer(node)
+
 		nodes[id] = node
 
-		go func(id int, addr string, node *raft.Raft) {
+		go func(addr string, id int) {
 			if err := node.ServeRPC(addr); err != nil {
 				log.Fatalf("node %d serve: %v", id, err)
 			}
-			node.Start() // now the loop runs
-		}(id, addr, node)
-	}
+		}(addr, id)
 
-	// Start interactive command handler
+		go func(apiAddr string, id int) {
+			if err := apiServer.StartHTTP(apiAddr); err != nil {
+				log.Fatalf("API server %d serve: %v", id, err)
+			}
+		}(apiAddrs[i], id)
+
+		go node.Start()
+	}
 
 	select {}
 }
