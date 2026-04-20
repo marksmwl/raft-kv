@@ -147,6 +147,8 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 		s.handleGet(w, r, key)
 	case "PUT", "POST":
 		s.handlePut(w, r, key)
+	case "DELETE":
+		s.handleDelete(w, r, key)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -216,5 +218,35 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		"key":     key,
 		"value":   value,
 		"message": fmt.Sprintf("Entry appended at index %d, will be replicated via AppendEntries", index),
+	})
+}
+
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, key string) {
+	// Check if this node is the leader
+	if !s.raft.IsLeader() {
+		http.Error(w, "Not the leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Create command
+	cmd := KVCommand{
+		Op:  "delete",
+		Key: key,
+	}
+
+	// Start the command (append to log and replicate)
+	index, ok := s.raft.StartCommand(cmd)
+	if !ok {
+		http.Error(w, "Failed to start command", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"index":   index,
+		"key":     key,
+		"message": fmt.Sprintf("Delete entry appended at index %d, will be replicated via AppendEntries", index),
 	})
 }
