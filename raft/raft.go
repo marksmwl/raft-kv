@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marksmwl/raft-kv/proto"
@@ -60,10 +61,34 @@ type Raft struct {
 
 	lastHeartbeatTime time.Time
 	stateMachine      StateMachine
+
+	dead int32
 }
 
 func (rf *Raft) GetID() int {
 	return rf.id
+}
+
+func (rf *Raft) Kill() {
+	atomic.StoreInt32(&rf.dead, 1)
+	fmt.Printf("[Node %d] Has been killed\n", rf.id)
+}
+
+func (rf *Raft) Revive() {
+	rf.mu.Lock()
+	rf.state = Follower
+	rf.votedFor = -1
+	rf.resetElectionTimer()
+	rf.mu.Unlock()
+	
+	atomic.StoreInt32(&rf.dead, 0)
+	fmt.Printf("[Node %d] Has been revived\n", rf.id)
+	go rf.Start()
+}
+
+func (rf *Raft) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
 }
 
 func New(id int, peers []string) *Raft {
@@ -112,14 +137,20 @@ func (rf *Raft) Start() {
 	go rf.applyCommittedEntries()
 
 	for {
+		if rf.killed() {
+			return
+		}
 		time.Sleep(5 * time.Millisecond) // 1 second heartbeat
 		rf.mu.Lock()
 
 		elapsedTime := time.Since(rf.lastHeartbeatTime)
 
-		if rf.state == Follower && elapsedTime > rf.getElectionTimeout() {
-			fmt.Printf("[Node %d] Haven't heard from leader in %v, should start election...\n",
-				rf.id, elapsedTime)
+		if rf.state != Leader && elapsedTime > rf.getElectionTimeout() {
+			if rf.state == Follower {
+				fmt.Printf("[Node %d] Haven't heard from leader in %v, should start election...\n", rf.id, elapsedTime)
+			} else {
+				fmt.Printf("[Node %d] Election timeout in %v, restarting election...\n", rf.id, elapsedTime)
+			}
 
 			rf.mu.Unlock()
 			rf.startElection()
@@ -135,6 +166,9 @@ func (rf *Raft) applyCommittedEntries() {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
@@ -152,6 +186,10 @@ func (rf *Raft) applyCommittedEntries() {
 // StartCommand starts agreement on a new log entry. Returns the index of the entry.
 // If this server isn't the leader, returns -1, false.
 func (rf *Raft) StartCommand(command interface{}) (int, bool) {
+	if rf.killed() {
+		return -1, false
+	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -197,6 +235,9 @@ func (rf *Raft) leaderHeartbeat() {
 	peers := rf.peers
 
 	for range t.C {
+		if rf.killed() {
+			return
+		}
 		rf.mu.Lock()
 		// Only send heartbeats if we're still the leader
 		if rf.state != Leader {

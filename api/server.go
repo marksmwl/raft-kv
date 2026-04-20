@@ -94,6 +94,8 @@ func NewServer(raftNode *raft.Raft) *Server {
 func (s *Server) StartHTTP(addr string) error {
 	s.mux.HandleFunc("/key/", s.handleKey)
 	s.mux.HandleFunc("/health", s.handleHealth)
+	s.mux.HandleFunc("/kill", s.handleKill)
+	s.mux.HandleFunc("/revive", s.handleRevive)
 	log.Printf("[Node %d] HTTP API server starting on %s", s.raft.GetID(), addr)
 	return http.ListenAndServe(addr, s.mux)
 }
@@ -104,6 +106,32 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "ok",
 		"isLeader": isLeader,
+	})
+}
+
+func (s *Server) handleKill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.raft.Kill()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "killed",
+		"node":   s.raft.GetID(),
+	})
+}
+
+func (s *Server) handleRevive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.raft.Revive()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "revived",
+		"node":   s.raft.GetID(),
 	})
 }
 

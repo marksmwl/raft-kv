@@ -44,6 +44,10 @@ func (rf *Raft) ServeRPC(listenAddr string) error {
 
 // RPC Methods
 func (rf *Raft) RequestVote(_ context.Context, req *proto.RequestVoteRequest) (*proto.RequestVoteResponse, error) {
+	if rf.killed() {
+		return nil, fmt.Errorf("node is dead")
+	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -77,6 +81,10 @@ func (rf *Raft) RequestVote(_ context.Context, req *proto.RequestVoteRequest) (*
 }
 
 func (rf *Raft) AppendEntries(_ context.Context, req *proto.AppendEntriesRequest) (*proto.AppendEntriesResponse, error) {
+	if rf.killed() {
+		return nil, fmt.Errorf("node is dead")
+	}
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -96,6 +104,8 @@ func (rf *Raft) AppendEntries(_ context.Context, req *proto.AppendEntriesRequest
 		rf.state = Follower
 		rf.votedFor = -1
 		reply.Term = int64(rf.currentTerm)
+	} else if req.Term == int64(rf.currentTerm) && rf.state == Candidate {
+		rf.state = Follower
 	}
 
 	// Reset election timer since we received a heartbeat from the leader
