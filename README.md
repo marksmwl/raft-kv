@@ -8,7 +8,7 @@ A distributed key-value store built in Go, utilizing the Raft consensus algorith
 - **In-Memory Storage**: Fast, thread-safe, in-memory key-value map (`map[string]string`).
 - **HTTP API**: Provides a simple RESTful interface for clients.
 - **Local Cluster**: Out-of-the-box configuration to run a 5-node cluster locally for testing and development.
-- **gRPC Migration (In Progress)**: The project is currently transitioning to use gRPC for robust inter-node communication and client-server interactions.
+- **gRPC**: The project uses gRPC for inter-node communication and client-server interactions.
 
 ## Architecture
 
@@ -16,8 +16,6 @@ A distributed key-value store built in Go, utilizing the Raft consensus algorith
 2. **Write Routing**: Write operations are forwarded to the current Raft leader.
 3. **Log Replication**: The leader appends the command to its write-ahead log (WAL) and broadcasts it to follower nodes.
 4. **Commit & Apply**: Once a majority of nodes acknowledge the log entry, it is considered committed and gets applied to the local key-value state machine.
-
-For more details, see the [Architecture Document](architecture.md).
 
 ## Getting Started
 
