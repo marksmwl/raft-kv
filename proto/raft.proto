@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package raft;
+option go_package = "github.com/marksmwl/raft-kv/proto";
+
+// The Raft service definition
+service Raft {
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+}
+
+message LogEntry {
+  int64 index = 1;
+  int64 term = 2;
+  bytes command = 3; // Commands are sent as raw bytes
+}
+
+message AppendEntriesRequest {
+  int64 term = 1;
+  int32 leader_id = 2;
+  int64 prev_log_index = 3;
+  int64 prev_log_term = 4;
+  repeated LogEntry entries = 5;
+  int64 leader_commit = 6;
+}
+
+message AppendEntriesResponse {
+  int64 term = 1;
+  bool success = 2;
+}
+
+message RequestVoteRequest {
+  int64 term = 1;
+  int32 candidate_id = 2;
+  int64 last_log_index = 3;
+  int64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  int64 term = 1;
+  bool vote_granted = 2;
+}

@@ -1,10 +1,16 @@
 package raft
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/marksmwl/raft-kv/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type NodeState int
@@ -33,11 +39,14 @@ type StateMachine interface {
 }
 
 type Raft struct {
+	proto.UnimplementedRaftServer
+
 	mu sync.Mutex
 
-	peers []string
-	id    int
-	state NodeState
+	peers   []string
+	clients []proto.RaftClient
+	id      int
+	state   NodeState
 
 	currentTerm int
 	votedFor    int
@@ -72,6 +81,20 @@ func New(id int, peers []string) *Raft {
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+
+	clients := make([]proto.RaftClient, len(peers))
+	for i, peer := range peers {
+		if i == id-1 {
+			continue
+		}
+		conn, err := grpc.NewClient(peer, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err == nil {
+			clients[i] = proto.NewRaftClient(conn)
+		} else {
+			fmt.Printf("Failed to dial peer %s: %v\n", peer, err)
+		}
+	}
+	rf.clients = clients
 
 	fmt.Println("Node", id, "is now a", rf.state)
 	return rf
@@ -206,22 +229,38 @@ func (rf *Raft) leaderHeartbeat() {
 				}
 				rf.mu.Unlock()
 
-				args := &AppendEntriesArgs{
-					Term:         currentTerm,
-					LeaderId:     leaderId,
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
-					Entries:      entries,
-					LeaderCommit: commitIndex,
+				protoEntries := make([]*proto.LogEntry, len(entries))
+				for idx, e := range entries {
+					cmdBytes, _ := json.Marshal(e.Command)
+					protoEntries[idx] = &proto.LogEntry{
+						Term:    int64(e.Term),
+						Index:   int64(e.Index),
+						Command: cmdBytes,
+					}
 				}
-				reply := &AppendEntriesReply{}
-				if err := call(peer, "Raft.AppendEntries", args, reply); err != nil {
+
+				args := &proto.AppendEntriesRequest{
+					Term:         int64(currentTerm),
+					LeaderId:     int32(leaderId),
+					PrevLogIndex: int64(prevLogIndex),
+					PrevLogTerm:  int64(prevLogTerm),
+					Entries:      protoEntries,
+					LeaderCommit: int64(commitIndex),
+				}
+				
+				client := rf.clients[peerIndex]
+				if client == nil {
+					return
+				}
+				
+				reply, err := client.AppendEntries(context.Background(), args)
+				if err != nil {
 					fmt.Printf("[Node %d] AppendEntries RPC to %s failed: %v\n", leaderId, peer, err)
 				} else {
 					rf.mu.Lock()
 					// If we got a reply with a higher term, step down
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
+					if reply.Term > int64(rf.currentTerm) {
+						rf.currentTerm = int(reply.Term)
 						rf.state = Follower
 						rf.votedFor = -1
 						rf.resetElectionTimer()
@@ -288,13 +327,19 @@ func (rf *Raft) startElection() {
 			continue
 		}
 
-		go func(peer string) {
-			args := &RequestVoteArgs{
-				Term:        currentTerm,
-				CandidateId: candidateId,
+		go func(peerIndex int, peer string) {
+			args := &proto.RequestVoteRequest{
+				Term:        int64(currentTerm),
+				CandidateId: int32(candidateId),
 			}
-			reply := &RequestVoteReply{}
-			if err := call(peer, "Raft.RequestVote", args, reply); err != nil {
+			
+			client := rf.clients[peerIndex]
+			if client == nil {
+				return
+			}
+			
+			reply, err := client.RequestVote(context.Background(), args)
+			if err != nil {
 				fmt.Printf("[Node %d] RequestVote RPC to %s failed: %v\n", candidateId, peer, err)
 				return
 			}
@@ -303,8 +348,8 @@ func (rf *Raft) startElection() {
 			defer rf.mu.Unlock()
 
 			// If reply has higher term, step down
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
+			if reply.Term > int64(rf.currentTerm) {
+				rf.currentTerm = int(reply.Term)
 				rf.state = Follower
 				rf.votedFor = -1
 				rf.resetElectionTimer()
@@ -340,6 +385,6 @@ func (rf *Raft) startElection() {
 					rf.mu.Lock()
 				}
 			}
-		}(peer)
+		}(i, peer)
 	}
 }
